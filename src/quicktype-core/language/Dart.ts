@@ -5,7 +5,7 @@ import {
     ClassType,
     ClassProperty,
     TransformedStringTypeKind,
-    PrimitiveStringTypeKind
+    PrimitiveStringTypeKind,
 } from "../Type";
 import { matchType, nullableFromUnion, directlyReachableSingleNamedType } from "../TypeUtils";
 import { Sourcelike, maybeAnnotated, modifySource } from "../Source";
@@ -43,7 +43,8 @@ export const dartOptions = {
     methodNamesWithMap: new BooleanOption("from-map", "Use method names fromMap() & toMap()", false),
     requiredProperties: new BooleanOption("required-props", "Make all properties required", false),
     finalProperties: new BooleanOption("final-props", "Make all properties final", false),
-    generateCopyWith: new BooleanOption("copy-with", "Generate CopyWith method", false),
+    generateCopyWith: new BooleanOption("copy-with", "Generate copyWith method", false),
+    generateMergeWith: new BooleanOption("merge-with", "Generate mergeWith method", false),
 };
 
 export class DartTargetLanguage extends TargetLanguage {
@@ -58,7 +59,8 @@ export class DartTargetLanguage extends TargetLanguage {
             dartOptions.methodNamesWithMap,
             dartOptions.requiredProperties,
             dartOptions.finalProperties,
-            dartOptions.generateCopyWith
+            dartOptions.generateCopyWith,
+            dartOptions.generateMergeWith,
         ];
     }
 
@@ -149,7 +151,8 @@ const keywords = [
     "fromJson",
     "toJson",
     "fromMap",
-    "toMap"
+    "toMap",
+    "mergeWith"
 ];
 
 const typeNamingFunction = funPrefixNamer("types", n => dartNameStyle(true, false, n));
@@ -442,6 +445,45 @@ export class DartRenderer extends ConvenienceRenderer {
         );
     }
 
+    protected mergeDynamicExpression(n: Name | string, t: Type, ...dynamic: Sourcelike[]): Sourcelike {
+        return matchType<Sourcelike>(
+            t,
+            _anyType => dynamic,
+            _nullType => dynamic, // FIXME: check null
+            _boolType => dynamic,
+            _integerType => dynamic,
+            _doubleType => [dynamic, ".toDouble()"],
+            _stringType => dynamic,
+            arrayType => // TODO: How merge lists?
+                this.mapList(this.dartType(arrayType.items), dynamic, this.fromDynamicExpression(arrayType.items, "x")),
+            _classType => [
+                n,
+                ".mergeFrom(",
+                dynamic,
+                ")"
+            ],
+            mapType =>
+                this.mapMap(this.dartType(mapType.values), dynamic, this.mergeDynamicExpression(n, mapType.values, "v")),
+            enumType => [defined(this._enumValues.get(enumType)), ".map[", dynamic, "]"],
+            unionType => {
+                const maybeNullable = nullableFromUnion(unionType);
+                if (maybeNullable === null) {
+                    return dynamic;
+                }
+                return [dynamic, " == null ? null : ", this.mergeDynamicExpression(n, maybeNullable, dynamic)];
+            },
+            transformedStringType => {
+                switch (transformedStringType.kind) {
+                    case "date-time":
+                    case "date":
+                        return ["DateTime.parse(", dynamic, ")"];
+                    default:
+                        return dynamic;
+                }
+            }
+        );
+    }
+
     protected emitClassDefinition(c: ClassType, className: Name): void {
         this.emitDescription(this.descriptionForType(c));
         this.emitBlock(["class ", className], () => {
@@ -469,7 +511,6 @@ export class DartRenderer extends ConvenienceRenderer {
             }
 
             if (this._options.generateCopyWith) {
-
                 this.ensureBlankLine();
                 this.emitLine(className, " copyWith({");
                 this.indent(() => {
@@ -491,6 +532,21 @@ export class DartRenderer extends ConvenienceRenderer {
             }
 
             if (this._options.justTypes) return;
+
+            if (this._options.generateMergeWith) {
+                this.ensureBlankLine();
+                this.emitLine(className, " mergeWith(Map<String, dynamic> json) => ", className, "(");
+                this.indent(() => {
+                    this.forEachClassProperty(c, "none", (name, jsonName, property) => {
+                        this.emitLine(name, ": json.containsKey(\"", jsonName, "\")");
+                        this.indent(() => {
+                            this.emitLine("? ", this.mergeDynamicExpression(name, property.type, 'json["', stringEscape(jsonName), '"]'));
+                            this.emitLine(": ", name, ",");
+                        });
+                    });
+                });
+                this.emitLine(");");
+            }
 
             if (this._options.codersInClass) {
                 this.ensureBlankLine();
